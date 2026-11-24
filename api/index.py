@@ -44,8 +44,7 @@ def chunks(buf):
     out = []
     while p + 12 <= len(buf):
         (ln,) = struct.unpack(">I", buf[p:p + 4])
-        typ = buf[p + 4:p + 8]
-        out.append((typ, ln, buf[p + 8:p + 8 + ln]))
+        out.append((buf[p + 4:p + 8], ln, buf[p + 8:p + 8 + ln]))
         p += 12 + ln
     return out
 
@@ -71,22 +70,20 @@ def unwrap_png(buf):
                 itxt.append((n, raw))
     if idat:
         blob = b"".join(idat)
-        if blob[:1] == b"\x47":
-            return blob
         try:
             d = zlib.decompress(blob)
-            if d[:1] == b"\x47":
-                return d
         except Exception:
-            pass
+            d = b""
+        i = d.find(b"KWP1")
+        if i >= 0:
+            t = d[i + 4:]
+            if t[:1] == b"\x47":
+                return t
+        if d[:1] == b"\x47":
+            return d
     if itxt:
         itxt.sort()
         return b"".join(x for _, x in itxt)
-    i = buf.rfind(b"IEND")
-    if i > 0 and len(buf) > i + 8:
-        tail = buf[i + 8:]
-        if tail[:1] == b"\x47":
-            return tail
     return None
 
 
@@ -119,25 +116,24 @@ def do_fhex(s):
             return Response("nessun segmento", media_type="text/plain")
         sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
         b = sg.content
-        out = ["len: %d" % len(b), "head: %s" % b[:16].hex(" ")]
+        out = ["len: %d" % len(b)]
         ch = chunks(b)
-        out.append("chunks: " + " ".join("%s:%d" % (t.decode("latin1", "replace"), l) for t, l, _ in ch[:14]))
-        idat = [d for t, l, d in ch if t == b"IDAT"]
-        blob = b"".join(idat)
-        out.append("idatLen: %d" % len(blob))
-        out.append("idatHead: %s" % blob[:16].hex(" "))
-        try:
-            d = zlib.decompress(blob)
-            out.append("decompLen: %d" % len(d))
-            out.append("decompHead: %s" % d[:16].hex(" "))
-        except Exception as e:
-            out.append("decompErr: %s" % e)
-        i = b.rfind(b"IEND")
-        out.append("iend: %d" % i)
-        if i > 0:
-            tail = b[i + 8:]
-            out.append("tailLen: %d" % len(tail))
-            out.append("tailHead: %s" % tail[:16].hex(" "))
+        ihdr = [d for t, l, d in ch if t == b"IHDR"]
+        idat = b"".join(d for t, l, d in ch if t == b"IDAT")
+        if ihdr:
+            w, h = struct.unpack(">II", ihdr[0][:8])
+            out.append("dim: %dx%d tipo %d prof %d" % (w, h, ihdr[0][9], ihdr[0][8]))
+        out.append("idatLen: %d" % len(idat))
+        d = zlib.decompress(idat)
+        out.append("decompLen: %d" % len(d))
+        out.append("primi96: %s" % d[:96].hex(" "))
+        i = d.find(b"KWP1")
+        out.append("kwp1: %d" % i)
+        if i >= 0:
+            out.append("dopoKwp: %s" % d[i:i + 96].hex(" "))
+        out.append("sync47: %d" % d.count(b"\x47"))
+        out.append("primo47: %d" % d.find(b"\x47"))
+        out.append("tsFinale: %s" % (unwrap_png(b)[:8].hex(" ") if unwrap_png(b) else "NO"))
         return Response("\n".join(out), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
@@ -185,8 +181,7 @@ def do_m3u8(request, u):
             if line.startswith("#"):
                 out.append(line)
                 continue
-            absu = urljoin(src, line)
-            out.append(host + "/seg/" + b64e(absu) + ".ts")
+            out.append(host + "/seg/" + b64e(urljoin(src, line)) + ".ts")
         out.insert(0, "#EXTM3U")
         return Response("\n".join(out) + "\n", media_type="application/vnd.apple.mpegurl")
     except Exception as e:
