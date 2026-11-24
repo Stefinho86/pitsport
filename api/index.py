@@ -65,39 +65,6 @@ def decomp(buf):
         return None, ihdr
 
 
-def unwrap_png(buf):
-    d, ihdr = decomp(buf)
-    if not d or not ihdr:
-        return None
-    w, h = struct.unpack(">II", ihdr[:8])
-    bpp = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ihdr[9], 3) * max(1, ihdr[8] // 8)
-    row = 1 + w * bpp
-    rows = len(d) // row
-    if row < 2 or rows < 2:
-        return None
-    flat = b"".join(d[k + 1:k + row] for k in range(0, rows * row, row))
-    ln = 0
-    if flat[:4] == b"KWP1":
-        ln = struct.unpack(">I", flat[4:8])[0]
-        flat = flat[8:]
-    out = []
-    i = 0
-    n = len(flat)
-    while i + 188 < n:
-        if flat[i] == 0x47 and flat[i + 188] == 0x47:
-            j = i
-            while j + 188 <= n and flat[j] == 0x47:
-                out.append(flat[j:j + 188])
-                j += 188
-            i = j
-        else:
-            i += 1
-    payload = b"".join(out)
-    if not payload:
-        return None
-    return payload[:ln] if ln and ln <= len(payload) else payload
-
-
 def follow(url):
     r = creq.get(url, headers=hdr(), impersonate="chrome", timeout=25)
     text = r.text
@@ -123,12 +90,21 @@ def do_fhex(s):
         src, text = follow(source_of(s))
         segs = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
         sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
-        t = unwrap_png(sg.content)
-        if not t:
-            return Response("estrazione fallita", media_type="text/plain")
-        n = len(t) // 188
-        ok = sum(1 for x in range(0, n * 188, 188) if t[x] == 0x47)
-        return Response("len: %d n: %d allineati: %d (%.3f)" % (len(t), n, ok, ok / max(1, n)), media_type="text/plain")
+        d, ihdr = decomp(sg.content)
+        w, h = struct.unpack(">II", ihdr[:8])
+        row = 1 + w * 3
+        rows = len(d) // row
+        flat = b"".join(d[k + 1:k + row] for k in range(0, rows * row, row))
+        starts = [flat[k] for k in range(0, min(rows, 200) * row, row)]
+        out = ["row: %d rows: %d" % (row, rows), "flatLen: %d" % len(flat)]
+        out.append("inizi47: %d su %d" % (sum(1 for x in starts if x == 0x47), len(starts)))
+        out.append("primi30inizi: %s" % "".join("%02x" % x for x in starts[:30]))
+        pair = 0
+        for k in range(0, min(rows, 200) * row, row):
+            if flat[k] == 0x47 and flat[k + 188] == 0x47:
+                pair += 1
+        out.append("coppie47: %d" % pair)
+        return Response("\n".join(out), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
 
@@ -189,9 +165,10 @@ def do_seg(u):
         if r.status_code != 200:
             return Response(r.text[:200], status_code=r.status_code, media_type="text/plain")
         buf = r.content
-        ts = unwrap_png(buf)
-        if ts:
-            return Response(ts, media_type="video/mp2t")
+        ts = None
+        d, ihdr = decomp(buf)
+        if d:
+            return Response(d[:64], media_type="application/octet-stream")
         return Response(buf, media_type=r.headers.get("content-type", "video/mp2t"))
     except Exception as e:
         return Response("errore: " + str(e), status_code=502)
