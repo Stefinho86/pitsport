@@ -141,20 +141,12 @@ def do_fhex(s):
         src, text = follow(source_of(s))
         segs = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
         sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
-        d, ihdr = decomp(sg.content)
-        w, h = struct.unpack(">II", ihdr[:8])
-        row = 1 + w * 3
-        from collections import Counter
-        filt = Counter(d[k] for k in range(0, len(d) - row + 1, row))
         t = unwrap_png(sg.content)
-        out = ["row: %d filtri: %s" % (row, dict(filt))]
-        if t:
-            n = len(t) // 188
-            ok = sum(1 for x in range(0, n * 188, 188) if t[x] == 0x47)
-            out.append("len: %d n: %d allineati: %d (%.3f)" % (len(t), n, ok, ok / max(1, n)))
-        else:
-            out.append("estrazione: NO")
-        return Response("\n".join(out), media_type="text/plain")
+        if not t:
+            return Response("estrazione fallita", media_type="text/plain")
+        n = len(t) // 188
+        ok = sum(1 for x in range(0, n * 188, 188) if t[x] == 0x47)
+        return Response("len: %d n: %d allineati: %d (%.3f)" % (len(t), n, ok, ok / max(1, n)), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
 
@@ -162,8 +154,8 @@ def do_fhex(s):
 def do_one(request, s):
     try:
         host = str(request.base_url).rstrip("/") + "/api"
-        body = "#EXTM3U\n#EXTINF:-1,test\n" + host + "/m3u8/" + b64e(source_of(s)) + ".m3u8\n"
-        return Response(body, media_type="audio/x-mpegurl")
+        body = "#EXTM3U\n#EXTINF:-1,test\n" + host + "/m3u8/" + b64e(s) + ".m3u8\n"
+        return Response(body, media_type="audio/x-mpegurl", headers={"cache-control": "no-store"})
     except Exception as e:
         return Response("errore: " + str(e), status_code=502)
 
@@ -176,22 +168,16 @@ def do_playlist(request):
         host = str(request.base_url).rstrip("/") + "/api"
         lines = ["#EXTM3U", "#EXT-X-VERSION:3"]
         for p in items[:80]:
-            try:
-                src = source_of(str(p["programId"]))
-                if not src:
-                    continue
-                lines.append('#EXTINF:-1 group-title="%s",%s' % (p.get("footer") or "PitSport", p.get("titleText") or p.get("slug")))
-                lines.append(host + "/m3u8/" + b64e(src) + ".m3u8")
-            except Exception:
-                pass
-        return Response("\n".join(lines) + "\n", media_type="audio/x-mpegurl")
+            lines.append('#EXTINF:-1 group-title="%s",%s' % (p.get("footer") or "PitSport", p.get("titleText") or p.get("slug")))
+            lines.append(host + "/m3u8/" + b64e(str(p["programId"])) + ".m3u8")
+        return Response("\n".join(lines) + "\n", media_type="audio/x-mpegurl", headers={"cache-control": "no-store"})
     except Exception as e:
         return Response("errore: " + str(e), status_code=502)
 
 
 def do_m3u8(request, u):
     try:
-        src, text = follow(b64d(u))
+        src, text = follow(source_of(b64d(u)))
         host = str(request.base_url).rstrip("/") + "/api"
         out = []
         for line in text.splitlines():
@@ -203,7 +189,7 @@ def do_m3u8(request, u):
                 continue
             out.append(host + "/seg/" + b64e(urljoin(src, line)) + ".ts")
         out.insert(0, "#EXTM3U")
-        return Response("\n".join(out) + "\n", media_type="application/vnd.apple.mpegurl")
+        return Response("\n".join(out) + "\n", media_type="application/vnd.apple.mpegurl", headers={"cache-control": "no-store"})
     except Exception as e:
         return Response("errore: " + str(e), status_code=502)
 
