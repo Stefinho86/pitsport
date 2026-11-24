@@ -118,7 +118,19 @@ def do_raw(request, s):
         src = source_of(s)
         host = str(request.base_url).rstrip("/") + "/api"
         r = creq.get(src, headers=hdr(), impersonate="chrome", timeout=25)
-        out = ["status upstream: %d" % r.status_code, "---", r.text[:800]]
+        out = ["src: " + src, "status: %d" % r.status_code, "--- riscritto ---"]
+        for line in r.text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                out.append(line)
+                continue
+            absu = urljoin(src, line)
+            if ".m3u8" in line:
+                out.append(host + "/m3u8/" + b64e(absu) + ".m3u8")
+            else:
+                out.append(host + "/seg/" + b64e(absu) + ".ts")
         return Response("\n".join(out), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
