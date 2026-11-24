@@ -121,21 +121,22 @@ def do_fhex(s):
         src, text = follow(source_of(s))
         segs = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
         sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
+        payload, row = payload_of(sg.content)
+        if not payload:
+            return Response("estrazione fallita", media_type="text/plain")
         t = unwrap_png(sg.content)
         if not t:
-            return Response("estrazione fallita", media_type="text/plain")
-        pos = []
-        k = t.find(b"\x47")
-        while k >= 0 and len(pos) < 30:
-            pos.append(k)
-            k = t.find(b"\x47", k + 1)
-        gaps = [pos[i + 1] - pos[i] for i in range(len(pos) - 1)]
+            return Response("unwrap fallito", media_type="text/plain")
         n = len(t) // 188
-        ok = sum(1 for x in range(0, n * 188, 188) if t[x] == 0x47)
-        out = ["len: %d" % len(t), "total47: %d" % t.count(b"\x47")]
-        out.append("allineati: %d/%d (%.3f)" % (ok, n, ok / max(1, n)))
-        out.append("primi47: %s" % ",".join(str(p) for p in pos[:12]))
-        out.append("gaps: %s" % ",".join(str(g) for g in gaps[:12]))
+        bad = -1
+        for x in range(0, n * 188, 188):
+            if t[x] != 0x47:
+                bad = x
+                break
+        out = ["row: %d" % row, "len: %d" % len(t), "n: %d" % n, "primoBad: %d" % bad]
+        if bad > 0:
+            out.append("rapporto row: %.3f" % (bad / max(1, row)))
+            out.append("intorno: %s" % t[max(0, bad - 12):bad + 20].hex(" "))
         return Response("\n".join(out), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
