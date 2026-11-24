@@ -96,6 +96,18 @@ def unwrap_png(buf):
     return None
 
 
+def follow(url):
+    r = creq.get(url, headers=hdr(), impersonate="chrome", timeout=25)
+    text = r.text
+    if "#EXT-X-STREAM-INF" in text:
+        v = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
+        if v:
+            url = urljoin(url, v[0])
+            r = creq.get(url, headers=hdr(), impersonate="chrome", timeout=25)
+            text = r.text
+    return url, text
+
+
 def source_of(s):
     pr = creq.get(API + "/programs/" + s, headers=hdr({"Referer": "https://pitsport.st/", "Accept": "application/json"}), impersonate="chrome", timeout=25)
     vids = pr.json()["data"].get("videos") or []
@@ -104,34 +116,16 @@ def source_of(s):
     return w.json().get("url", "")
 
 
-def media_of(s):
-    src = source_of(s)
-    r = creq.get(src, headers=hdr(), impersonate="chrome", timeout=25)
-    text = r.text
-    if "#EXT-X-STREAM-INF" in text:
-        v = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
-        if v:
-            src = urljoin(src, v[0])
-            r = creq.get(src, headers=hdr(), impersonate="chrome", timeout=25)
-            text = r.text
-    return src, text
-
-
 def do_fhex(s):
     try:
-        src, text = media_of(s)
+        src, text = follow(source_of(s))
         segs = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
         if not segs:
             return Response("nessun segmento", media_type="text/plain")
         sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
         b = sg.content
         ts = unwrap_png(b)
-        out = ["len: %d" % len(b)]
-        out.append("ts: %s" % (ts[:16].hex(" ") if ts else "NO"))
-        out.append("tsLen: %d" % (len(ts) if ts else 0))
-        if ts:
-            out.append("sync188: %s" % (ts[188] == 0x47))
-        return Response("\n".join(out), media_type="text/plain")
+        return Response("len: %d\nts: %s\nsync188: %s" % (len(b), ts[:16].hex(" ") if ts else "NO", (ts[188] == 0x47) if ts else "-"), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
 
@@ -168,7 +162,7 @@ def do_playlist(request):
 
 def do_m3u8(request, u):
     try:
-        src, text = media_of(b64d(u))
+        src, text = follow(b64d(u))
         host = str(request.base_url).rstrip("/") + "/api"
         out = []
         for line in text.splitlines():
