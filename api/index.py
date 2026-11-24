@@ -73,6 +73,19 @@ def source_of(s):
     return w.json().get("url", "")
 
 
+def media_of(s):
+    src = source_of(s)
+    r = creq.get(src, headers=hdr(), impersonate="chrome", timeout=25)
+    text = r.text
+    if "#EXT-X-STREAM-INF" in text:
+        v = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
+        if v:
+            src = urljoin(src, v[0])
+            r = creq.get(src, headers=hdr(), impersonate="chrome", timeout=25)
+            text = r.text
+    return src, text
+
+
 def do_test(s):
     try:
         r = creq.get(source_of(s), headers=hdr(), impersonate="chrome", timeout=25)
@@ -85,23 +98,13 @@ def do_test(s):
 def do_chain(s):
     out = {}
     try:
-        src = source_of(s)
-        r = creq.get(src, headers=hdr(), impersonate="chrome", timeout=25)
-        out["manifest"] = r.status_code
-        lines = [x.strip() for x in r.text.splitlines() if x.strip() and not x.startswith("#")]
-        if not lines:
-            out["nota"] = "manifest senza righe"
+        src, text = media_of(s)
+        out["media"] = "ok"
+        segs = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
+        if not segs:
+            out["nota"] = "nessun segmento"
             return Response(json.dumps(out), media_type="application/json")
-        first = urljoin(src, lines[0])
-        if ".m3u8" in first:
-            r2 = creq.get(first, headers=hdr(), impersonate="chrome", timeout=25)
-            out["livello2"] = r2.status_code
-            l2 = [x.strip() for x in r2.text.splitlines() if x.strip() and not x.startswith("#")]
-            if not l2:
-                out["nota"] = "livello 2 senza righe"
-                return Response(json.dumps(out), media_type="application/json")
-            first = urljoin(first, l2[0])
-        sg = creq.get(first, headers=hdr(), impersonate="chrome", timeout=25)
+        sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
         b = sg.content
         out["segmento"] = sg.status_code
         out["len"] = len(b)
@@ -115,11 +118,10 @@ def do_chain(s):
 
 def do_raw(request, s):
     try:
-        src = source_of(s)
+        src, text = media_of(s)
         host = str(request.base_url).rstrip("/") + "/api"
-        r = creq.get(src, headers=hdr(), impersonate="chrome", timeout=25)
-        out = ["src: " + src, "status: %d" % r.status_code, "--- riscritto ---"]
-        for line in r.text.splitlines():
+        out = ["src: " + src, "--- riscritto ---"]
+        for line in text.splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -136,12 +138,16 @@ def do_raw(request, s):
         return Response("errore: " + str(e), media_type="text/plain")
 
 
-def do_hex(u):
+def do_fhex(s):
     try:
-        url = b64d(u)
-        r = creq.get(url, headers=hdr(), impersonate="chrome", timeout=25)
-        b = r.content
-        return Response("ct: %s\nlen: %d\n%s" % (r.headers.get("content-type"), len(b), b[:600].hex(" ")), media_type="text/plain")
+        src, text = media_of(s)
+        segs = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
+        if not segs:
+            return Response("nessun segmento nel manifest", media_type="text/plain")
+        sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
+        b = sg.content
+        out = ["status: %d" % sg.status_code, "ct: %s" % sg.headers.get("content-type"), "len: %d" % len(b), "---", b[:700].hex(" ")]
+        return Response("\n".join(out), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
 
@@ -178,19 +184,7 @@ def do_playlist(request):
 
 def do_m3u8(request, u):
     try:
-        url = b64d(u)
-        r = creq.get(url, headers=hdr(), impersonate="chrome", timeout=25)
-        if r.status_code != 200:
-            return Response(r.text[:400], status_code=r.status_code, media_type="text/plain")
-        text = r.text
-        if "#EXT-X-STREAM-INF" in text:
-            v = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
-            if v:
-                url = urljoin(url, v[0])
-                r = creq.get(url, headers=hdr(), impersonate="chrome", timeout=25)
-                if r.status_code != 200:
-                    return Response(r.text[:400], status_code=r.status_code, media_type="text/plain")
-                text = r.text
+        src, text = media_of(b64d(u))
         host = str(request.base_url).rstrip("/") + "/api"
         out = []
         for line in text.splitlines():
@@ -200,11 +194,8 @@ def do_m3u8(request, u):
             if line.startswith("#"):
                 out.append(line)
                 continue
-            absu = urljoin(url, line)
-            if ".m3u8" in line:
-                out.append(host + "/m3u8/" + b64e(absu) + ".m3u8")
-            else:
-                out.append(host + "/seg/" + b64e(absu) + ".ts")
+            absu = urljoin(src, line)
+            out.append(host + "/seg/" + b64e(absu) + ".ts")
         out.insert(0, "#EXTM3U")
         return Response("\n".join(out) + "\n", media_type="application/vnd.apple.mpegurl")
     except Exception as e:
@@ -241,8 +232,8 @@ def dispatch(request: Request, path: str = ""):
         return do_chain(q.get("s", "103388"))
     if name == "raw":
         return do_raw(request, q.get("s", "103388"))
-    if name == "hex":
-        return do_hex(arg_u(parts, q))
+    if name == "fhex":
+        return do_fhex(q.get("s", "103388"))
     if name == "one":
         return do_one(request, q.get("s", "103388"))
     if name == "playlist.m3u":
