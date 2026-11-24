@@ -111,7 +111,7 @@ def do_chain(s):
 def do_one(request, s):
     try:
         host = str(request.base_url).rstrip("/") + "/api"
-        body = "#EXTM3U\n#EXTINF:-1,test\n" + host + "/m3u8?u=" + b64e(source_of(s)) + "\n"
+        body = "#EXTM3U\n#EXTINF:-1,test\n" + host + "/m3u8/" + b64e(source_of(s)) + ".m3u8\n"
         return Response(body, media_type="audio/x-mpegurl")
     except Exception as e:
         return Response("errore: " + str(e), status_code=502)
@@ -130,7 +130,7 @@ def do_playlist(request):
                 if not src:
                     continue
                 lines.append('#EXTINF:-1 group-title="%s",%s' % (p.get("footer") or "PitSport", p.get("titleText") or p.get("slug")))
-                lines.append(host + "/m3u8?u=" + b64e(src))
+                lines.append(host + "/m3u8/" + b64e(src) + ".m3u8")
             except Exception:
                 pass
         return Response("\n".join(lines) + "\n", media_type="audio/x-mpegurl")
@@ -155,9 +155,9 @@ def do_m3u8(request, u):
                 continue
             absu = urljoin(url, line)
             if ".m3u8" in line:
-                out.append(host + "/m3u8?u=" + b64e(absu))
+                out.append(host + "/m3u8/" + b64e(absu) + ".m3u8")
             else:
-                out.append(host + "/seg?u=" + b64e(absu))
+                out.append(host + "/seg/" + b64e(absu) + ".ts")
         return Response("\n".join(out) + "\n", media_type="application/vnd.apple.mpegurl")
     except Exception as e:
         return Response("errore: " + str(e), status_code=502)
@@ -178,9 +178,10 @@ def do_seg(u):
         return Response("errore: " + str(e), status_code=502)
 
 
-@app.get("/api/{path:path}")
+@app.api_route("/api/{path:path}", methods=["GET", "HEAD"])
 def dispatch(request: Request, path: str = ""):
-    name = path.rstrip("/").split("/")[-1] if path else ""
+    parts = [x for x in path.split("/") if x]
+    name = parts[0] if parts else ""
     q = request.query_params
     if name in ("", "index"):
         return Response("pitsport proxy", media_type="text/plain")
