@@ -42,12 +42,16 @@ def arg_u(parts, q):
 def unwrap_png(buf):
     if buf[:2] != b"\x89P":
         return None
-    p, parts = 8, []
+    p = 8
+    idat = []
+    itxt = []
     while p + 12 <= len(buf):
         (ln,) = struct.unpack(">I", buf[p:p + 4])
         typ = buf[p + 4:p + 8]
         data = buf[p + 8:p + 8 + ln]
-        if typ == b"iTXt":
+        if typ == b"IDAT":
+            idat.append(data)
+        elif typ == b"iTXt":
             i = data.find(b"\x00")
             kw = data[:i].decode("latin1")
             if kw.startswith("payload-"):
@@ -57,12 +61,22 @@ def unwrap_png(buf):
                 raw = base64.b64decode(data[j + 1:].strip())
                 if raw[:1] != b"\x47":
                     raw = zlib.decompress(raw)
-                parts.append((n, raw))
+                itxt.append((n, raw))
         p += 12 + ln
-    if not parts:
-        return None
-    parts.sort()
-    return b"".join(x for _, x in parts)
+    if idat:
+        blob = b"".join(idat)
+        if blob[:1] == b"\x47":
+            return blob
+        try:
+            out = zlib.decompress(blob)
+            if out[:1] == b"\x47":
+                return out
+        except Exception:
+            pass
+    if itxt:
+        itxt.sort()
+        return b"".join(x for _, x in itxt)
+    return None
 
 
 def source_of(s):
@@ -99,43 +113,20 @@ def do_chain(s):
     out = {}
     try:
         src, text = media_of(s)
-        out["media"] = "ok"
         segs = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
         if not segs:
             out["nota"] = "nessun segmento"
             return Response(json.dumps(out), media_type="application/json")
         sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
         b = sg.content
+        ts = unwrap_png(b)
         out["segmento"] = sg.status_code
         out["len"] = len(b)
-        out["head"] = b[:8].hex(" ")
-        out["png"] = b[:2] == b"\x89P"
-        out["ts"] = b[:1] == b"\x47"
+        out["ts"] = ts[:1].hex() if ts else None
+        out["tsLen"] = len(ts) if ts else 0
     except Exception as e:
         out["errore"] = str(e)
     return Response(json.dumps(out), media_type="application/json")
-
-
-def do_raw(request, s):
-    try:
-        src, text = media_of(s)
-        host = str(request.base_url).rstrip("/") + "/api"
-        out = ["src: " + src, "--- riscritto ---"]
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("#"):
-                out.append(line)
-                continue
-            absu = urljoin(src, line)
-            if ".m3u8" in line:
-                out.append(host + "/m3u8/" + b64e(absu) + ".m3u8")
-            else:
-                out.append(host + "/seg/" + b64e(absu) + ".ts")
-        return Response("\n".join(out), media_type="text/plain")
-    except Exception as e:
-        return Response("errore: " + str(e), media_type="text/plain")
 
 
 def do_fhex(s):
@@ -146,7 +137,9 @@ def do_fhex(s):
             return Response("nessun segmento nel manifest", media_type="text/plain")
         sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
         b = sg.content
-        out = ["status: %d" % sg.status_code, "ct: %s" % sg.headers.get("content-type"), "len: %d" % len(b), "---", b[:700].hex(" ")]
+        ts = unwrap_png(b)
+        out = ["status: %d" % sg.status_code, "ct: %s" % sg.headers.get("content-type"), "len: %d" % len(b)]
+        out.append("ts: %s" % (ts[:8].hex(" ") if ts else "NO"))
         return Response("\n".join(out), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
@@ -230,8 +223,6 @@ def dispatch(request: Request, path: str = ""):
         return do_test(q.get("s", "103388"))
     if name == "chain":
         return do_chain(q.get("s", "103388"))
-    if name == "raw":
-        return do_raw(request, q.get("s", "103388"))
     if name == "fhex":
         return do_fhex(q.get("s", "103388"))
     if name == "one":
