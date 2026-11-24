@@ -49,51 +49,40 @@ def chunks(buf):
     return out
 
 
-def unwrap_png(buf):
+def payload_of(buf):
     if buf[:2] != b"\x89P":
         return None
     idat = []
     ihdr = None
-    itxt = []
     for typ, ln, data in chunks(buf):
         if typ == b"IDAT":
             idat.append(data)
         elif typ == b"IHDR":
             ihdr = data
-        elif typ == b"iTXt":
-            i = data.find(b"\x00")
-            kw = data[:i].decode("latin1")
-            if kw.startswith("payload-"):
-                n = int(kw[8:] or 0)
-                j = data.find(b"\x00", i + 3)
-                j = data.find(b"\x00", j + 1)
-                raw = base64.b64decode(data[j + 1:].strip())
-                if raw[:1] != b"\x47":
-                    raw = zlib.decompress(raw)
-                itxt.append((n, raw))
-    if idat and ihdr:
-        try:
-            d = zlib.decompress(b"".join(idat))
-        except Exception:
-            d = b""
-        if d:
-            w, h = struct.unpack(">II", ihdr[:8])
-            bpp = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ihdr[9], 3) * max(1, ihdr[8] // 8)
-            row = 1 + w * bpp
-            if row > 1:
-                payload = b"".join(d[k + 1:k + row] for k in range(0, len(d) - row + 1, row))
-                i = payload.find(b"KWP1")
-                j = payload.find(b"\x47", i + 4) if i >= 0 else payload.find(b"\x47")
-                while j >= 0 and j + 188 < len(payload) and payload[j + 188] != 0x47:
-                    j = payload.find(b"\x47", j + 1)
-                if j >= 0:
-                    return payload[j:]
-            if d[:1] == b"\x47":
-                return d
-    if itxt:
-        itxt.sort()
-        return b"".join(x for _, x in itxt)
-    return None
+    if not idat or not ihdr:
+        return None
+    try:
+        d = zlib.decompress(b"".join(idat))
+    except Exception:
+        return None
+    w, h = struct.unpack(">II", ihdr[:8])
+    bpp = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ihdr[9], 3) * max(1, ihdr[8] // 8)
+    row = 1 + w * bpp
+    if row < 2:
+        return None
+    return b"".join(d[k + 1:k + row] for k in range(0, len(d) - row + 1, row)), row
+
+
+def unwrap_png(buf):
+    res = payload_of(buf)
+    if not res:
+        return None
+    payload, _row = res
+    i = payload.find(b"KWP1")
+    j = payload.find(b"\x47", i + 4) if i >= 0 else payload.find(b"\x47")
+    while j >= 0 and j + 188 < len(payload) and payload[j + 188] != 0x47:
+        j = payload.find(b"\x47", j + 1)
+    return payload[j:] if j >= 0 else None
 
 
 def follow(url):
@@ -120,12 +109,18 @@ def do_fhex(s):
     try:
         src, text = follow(source_of(s))
         segs = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
-        if not segs:
-            return Response("nessun segmento", media_type="text/plain")
         sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
-        b = sg.content
-        ts = unwrap_png(b)
-        return Response("len: %d\nts: %s\nsync188: %s" % (len(b), ts[:16].hex(" ") if ts else "NO", (ts[188] == 0x47) if ts else "-"), media_type="text/plain")
+        res = payload_of(sg.content)
+        if not res:
+            return Response("payload non estratto", media_type="text/plain")
+        payload, row = res
+        n = len(payload) // 188
+        ok = sum(1 for k in range(0, n * 188, 188) if payload[k] == 0x47)
+        out = ["row: %d" % row, "payloadLen: %d" % len(payload), "pacchetti: %d" % n, "allineati: %d" % ok]
+        out.append("ratio: %.3f" % (ok / max(1, n)))
+        out.append("inizio riga 3: %s" % payload[row * 3 - 10:row * 3 + 10].hex(" "))
+        out.append("testa: %s" % payload[:20].hex(" "))
+        return Response("\n".join(out), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
 
