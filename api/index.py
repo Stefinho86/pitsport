@@ -136,6 +136,16 @@ def do_raw(request, s):
         return Response("errore: " + str(e), media_type="text/plain")
 
 
+def do_hex(u):
+    try:
+        url = b64d(u)
+        r = creq.get(url, headers=hdr(), impersonate="chrome", timeout=25)
+        b = r.content
+        return Response("ct: %s\nlen: %d\n%s" % (r.headers.get("content-type"), len(b), b[:600].hex(" ")), media_type="text/plain")
+    except Exception as e:
+        return Response("errore: " + str(e), media_type="text/plain")
+
+
 def do_one(request, s):
     try:
         host = str(request.base_url).rstrip("/") + "/api"
@@ -172,11 +182,20 @@ def do_m3u8(request, u):
         r = creq.get(url, headers=hdr(), impersonate="chrome", timeout=25)
         if r.status_code != 200:
             return Response(r.text[:400], status_code=r.status_code, media_type="text/plain")
+        text = r.text
+        if "#EXT-X-STREAM-INF" in text:
+            v = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
+            if v:
+                url = urljoin(url, v[0])
+                r = creq.get(url, headers=hdr(), impersonate="chrome", timeout=25)
+                if r.status_code != 200:
+                    return Response(r.text[:400], status_code=r.status_code, media_type="text/plain")
+                text = r.text
         host = str(request.base_url).rstrip("/") + "/api"
-        out = ["#EXTM3U"]
-        for line in r.text.splitlines():
+        out = []
+        for line in text.splitlines():
             line = line.strip()
-            if not line:
+            if not line or line == "#EXTM3U":
                 continue
             if line.startswith("#"):
                 out.append(line)
@@ -186,6 +205,7 @@ def do_m3u8(request, u):
                 out.append(host + "/m3u8/" + b64e(absu) + ".m3u8")
             else:
                 out.append(host + "/seg/" + b64e(absu) + ".ts")
+        out.insert(0, "#EXTM3U")
         return Response("\n".join(out) + "\n", media_type="application/vnd.apple.mpegurl")
     except Exception as e:
         return Response("errore: " + str(e), status_code=502)
@@ -221,6 +241,8 @@ def dispatch(request: Request, path: str = ""):
         return do_chain(q.get("s", "103388"))
     if name == "raw":
         return do_raw(request, q.get("s", "103388"))
+    if name == "hex":
+        return do_hex(arg_u(parts, q))
     if name == "one":
         return do_one(request, q.get("s", "103388"))
     if name == "playlist.m3u":
