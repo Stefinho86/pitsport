@@ -65,47 +65,43 @@ def decomp(buf):
         return None, ihdr
 
 
-def payload_of(buf):
+def packets(seg):
+    j = -1
+    for i in range(max(0, len(seg) - 376)):
+        if seg[i] == 0x47 and seg[i + 188] == 0x47 and seg[i + 376] == 0x47:
+            j = i
+            break
+    if j < 0:
+        return b""
+    out = []
+    while j + 188 <= len(seg) and seg[j] == 0x47:
+        out.append(seg[j:j + 188])
+        j += 188
+    return b"".join(out)
+
+
+def unwrap_png(buf):
     d, ihdr = decomp(buf)
     if not d or not ihdr:
-        return None, None, 0
+        return None
     w, h = struct.unpack(">II", ihdr[:8])
     bpp = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ihdr[9], 3) * max(1, ihdr[8] // 8)
     row = 1 + w * bpp
     rows = len(d) // row
-    if row < 2 or rows < 3 or len(d) % row != 0:
-        return None, row, 0
-    best = 0
-    for L in range((row - 1) // 188 * 188, 0, -188):
-        good = True
-        for k in range(row, min(rows, 24) * row, row):
-            if d[k + 1] != 0x47:
-                good = False
-                break
-        if good:
-            best = L
-            break
-    if not best:
-        return None, row, 0
-    payload = b"".join(d[k + 1:k + 1 + best] for k in range(0, rows * row, row))
-    return payload, row, best
-
-
-def unwrap_png(buf):
-    payload, _row, per = payload_of(buf)
-    if not payload:
+    if row < 2 or rows < 2:
         return None
-    if payload[:4] == b"KWP1" and len(payload) > 8:
-        ln = struct.unpack(">I", payload[4:8])[0]
-        if 0 < ln <= len(payload) - 8:
-            return payload[8:8 + ln]
-    i = payload.find(b"KWP1")
-    if i >= 0:
-        j = payload.find(b"\x47", i + 8)
-        if j >= 0:
-            return payload[j:]
-    j = payload.find(b"\x47")
-    return payload[j:] if j >= 0 else None
+    first = d[1:row]
+    ln = 0
+    if first[:4] == b"KWP1":
+        ln = struct.unpack(">I", first[4:8])[0]
+        first = first[8:]
+    parts = [packets(first)]
+    for k in range(row, rows * row, row):
+        parts.append(packets(d[k + 1:k + row]))
+    payload = b"".join(parts)
+    if ln and 0 < ln <= len(payload):
+        return payload[:ln]
+    return payload if payload else None
 
 
 def follow(url):
@@ -133,10 +129,9 @@ def do_fhex(s):
         src, text = follow(source_of(s))
         segs = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
         sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
-        payload, row, per = payload_of(sg.content)
-        if not payload:
-            return Response("estrazione fallita (row %d per %d)" % (row, per), media_type="text/plain")
         t = unwrap_png(sg.content)
+        if not t:
+            return Response("estrazione fallita", media_type="text/plain")
         n = len(t) // 188
         ok = sum(1 for x in range(0, n * 188, 188) if t[x] == 0x47)
         bad = -1
@@ -144,7 +139,7 @@ def do_fhex(s):
             if t[x] != 0x47:
                 bad = x
                 break
-        return Response("row: %d\nper: %d\nlen: %d\nn: %d\nallineati: %d (%.3f)\nprimoBad: %d" % (row, per, len(t), n, ok, ok / max(1, n), bad), media_type="text/plain")
+        return Response("len: %d\nn: %d\nallineati: %d (%.3f)\nprimoBad: %d\ntesta: %s" % (len(t), n, ok, ok / max(1, n), bad, t[:16].hex(" ")), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
 
