@@ -65,6 +65,57 @@ def decomp(buf):
         return None, ihdr
 
 
+def unfilter(d, row, bpp):
+    out = bytearray()
+    prev = bytearray(row - 1)
+    for k in range(0, len(d) - row + 1, row):
+        ft = d[k]
+        line = bytearray(d[k + 1:k + row])
+        if ft == 1:
+            for i in range(bpp, len(line)):
+                line[i] = (line[i] + line[i - bpp]) & 0xFF
+        elif ft == 2:
+            for i in range(len(line)):
+                line[i] = (line[i] + prev[i]) & 0xFF
+        elif ft == 3:
+            for i in range(len(line)):
+                a = line[i - bpp] if i >= bpp else 0
+                line[i] = (line[i] + ((a + prev[i]) >> 1)) & 0xFF
+        elif ft == 4:
+            for i in range(len(line)):
+                a = line[i - bpp] if i >= bpp else 0
+                b = prev[i]
+                c = prev[i - bpp] if i >= bpp else 0
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                line[i] = (line[i] + pr) & 0xFF
+        out += line
+        prev = line
+    return bytes(out)
+
+
+def unwrap_png(buf):
+    d, ihdr = decomp(buf)
+    if not d or not ihdr:
+        return None
+    w, h = struct.unpack(">II", ihdr[:8])
+    bpp = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ihdr[9], 3) * max(1, ihdr[8] // 8)
+    row = 1 + w * bpp
+    if row < 2 or len(d) < row * 2 or len(d) % row != 0:
+        return None
+    flat = unfilter(d, row, bpp)
+    if flat[:4] != b"KWP1":
+        i = flat.find(b"KWP1")
+        if i < 0:
+            return None
+        flat = flat[i:]
+    ln = struct.unpack(">I", flat[4:8])[0]
+    if 0 < ln <= len(flat) - 8:
+        return flat[8:8 + ln]
+    return flat[8:] if len(flat) > 8 else None
+
+
 def follow(url):
     r = creq.get(url, headers=hdr(), impersonate="chrome", timeout=25)
     text = r.text
@@ -93,17 +144,16 @@ def do_fhex(s):
         d, ihdr = decomp(sg.content)
         w, h = struct.unpack(">II", ihdr[:8])
         row = 1 + w * 3
-        rows = len(d) // row
-        flat = b"".join(d[k + 1:k + row] for k in range(0, rows * row, row))
-        starts = [flat[k] for k in range(0, min(rows, 200) * row, row)]
-        out = ["row: %d rows: %d" % (row, rows), "flatLen: %d" % len(flat)]
-        out.append("inizi47: %d su %d" % (sum(1 for x in starts if x == 0x47), len(starts)))
-        out.append("primi30inizi: %s" % "".join("%02x" % x for x in starts[:30]))
-        pair = 0
-        for k in range(0, min(rows, 200) * row, row):
-            if flat[k] == 0x47 and flat[k + 188] == 0x47:
-                pair += 1
-        out.append("coppie47: %d" % pair)
+        from collections import Counter
+        filt = Counter(d[k] for k in range(0, len(d) - row + 1, row))
+        t = unwrap_png(sg.content)
+        out = ["row: %d filtri: %s" % (row, dict(filt))]
+        if t:
+            n = len(t) // 188
+            ok = sum(1 for x in range(0, n * 188, 188) if t[x] == 0x47)
+            out.append("len: %d n: %d allineati: %d (%.3f)" % (len(t), n, ok, ok / max(1, n)))
+        else:
+            out.append("estrazione: NO")
         return Response("\n".join(out), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
@@ -165,10 +215,9 @@ def do_seg(u):
         if r.status_code != 200:
             return Response(r.text[:200], status_code=r.status_code, media_type="text/plain")
         buf = r.content
-        ts = None
-        d, ihdr = decomp(buf)
-        if d:
-            return Response(d[:64], media_type="application/octet-stream")
+        ts = unwrap_png(buf)
+        if ts:
+            return Response(ts, media_type="video/mp2t")
         return Response(buf, media_type=r.headers.get("content-type", "video/mp2t"))
     except Exception as e:
         return Response("errore: " + str(e), status_code=502)
