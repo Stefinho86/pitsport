@@ -53,10 +53,13 @@ def unwrap_png(buf):
     if buf[:2] != b"\x89P":
         return None
     idat = []
+    ihdr = None
     itxt = []
     for typ, ln, data in chunks(buf):
         if typ == b"IDAT":
             idat.append(data)
+        elif typ == b"IHDR":
+            ihdr = data
         elif typ == b"iTXt":
             i = data.find(b"\x00")
             kw = data[:i].decode("latin1")
@@ -68,19 +71,25 @@ def unwrap_png(buf):
                 if raw[:1] != b"\x47":
                     raw = zlib.decompress(raw)
                 itxt.append((n, raw))
-    if idat:
-        blob = b"".join(idat)
+    if idat and ihdr:
         try:
-            d = zlib.decompress(blob)
+            d = zlib.decompress(b"".join(idat))
         except Exception:
             d = b""
-        i = d.find(b"KWP1")
-        if i >= 0:
-            t = d[i + 4:]
-            if t[:1] == b"\x47":
-                return t
-        if d[:1] == b"\x47":
-            return d
+        if d:
+            w, h = struct.unpack(">II", ihdr[:8])
+            bpp = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ihdr[9], 3) * max(1, ihdr[8] // 8)
+            row = 1 + w * bpp
+            if row > 1:
+                payload = b"".join(d[k + 1:k + row] for k in range(0, len(d) - row + 1, row))
+                i = payload.find(b"KWP1")
+                j = payload.find(b"\x47", i + 4) if i >= 0 else payload.find(b"\x47")
+                while j >= 0 and j + 188 < len(payload) and payload[j + 188] != 0x47:
+                    j = payload.find(b"\x47", j + 1)
+                if j >= 0:
+                    return payload[j:]
+            if d[:1] == b"\x47":
+                return d
     if itxt:
         itxt.sort()
         return b"".join(x for _, x in itxt)
@@ -116,24 +125,12 @@ def do_fhex(s):
             return Response("nessun segmento", media_type="text/plain")
         sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
         b = sg.content
+        ts = unwrap_png(b)
         out = ["len: %d" % len(b)]
-        ch = chunks(b)
-        ihdr = [d for t, l, d in ch if t == b"IHDR"]
-        idat = b"".join(d for t, l, d in ch if t == b"IDAT")
-        if ihdr:
-            w, h = struct.unpack(">II", ihdr[0][:8])
-            out.append("dim: %dx%d tipo %d prof %d" % (w, h, ihdr[0][9], ihdr[0][8]))
-        out.append("idatLen: %d" % len(idat))
-        d = zlib.decompress(idat)
-        out.append("decompLen: %d" % len(d))
-        out.append("primi96: %s" % d[:96].hex(" "))
-        i = d.find(b"KWP1")
-        out.append("kwp1: %d" % i)
-        if i >= 0:
-            out.append("dopoKwp: %s" % d[i:i + 96].hex(" "))
-        out.append("sync47: %d" % d.count(b"\x47"))
-        out.append("primo47: %d" % d.find(b"\x47"))
-        out.append("tsFinale: %s" % (unwrap_png(b)[:8].hex(" ") if unwrap_png(b) else "NO"))
+        out.append("ts: %s" % (ts[:16].hex(" ") if ts else "NO"))
+        out.append("tsLen: %d" % (len(ts) if ts else 0))
+        if ts:
+            out.append("sync188: %s" % (ts[188] == 0x47))
         return Response("\n".join(out), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
