@@ -124,19 +124,11 @@ def do_fhex(s):
         payload, row = payload_of(sg.content)
         if not payload:
             return Response("estrazione fallita", media_type="text/plain")
-        t = unwrap_png(sg.content)
-        if not t:
-            return Response("unwrap fallito", media_type="text/plain")
-        n = len(t) // 188
-        bad = -1
-        for x in range(0, n * 188, 188):
-            if t[x] != 0x47:
-                bad = x
-                break
-        out = ["row: %d" % row, "len: %d" % len(t), "n: %d" % n, "primoBad: %d" % bad]
-        if bad > 0:
-            out.append("rapporto row: %.3f" % (bad / max(1, row)))
-            out.append("intorno: %s" % t[max(0, bad - 12):bad + 20].hex(" "))
+        out = ["row: %d" % row, "payloadLen: %d" % len(payload)]
+        out.append("confine1: %s" % payload[row - 24:row + 24].hex(" "))
+        out.append("confine2: %s" % payload[2 * row - 24:2 * row + 24].hex(" "))
+        out.append("ultimoPacchettoPrimaRiga: %d" % ((row - 1) // 188 * 188))
+        out.append("resto: %d" % ((row - 1) % 188))
         return Response("\n".join(out), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
