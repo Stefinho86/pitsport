@@ -39,16 +39,23 @@ def arg_u(parts, q):
     return q.get("u", "")
 
 
-def unwrap_png(buf):
-    if buf[:2] != b"\x89P":
-        return None
+def chunks(buf):
     p = 8
-    idat = []
-    itxt = []
+    out = []
     while p + 12 <= len(buf):
         (ln,) = struct.unpack(">I", buf[p:p + 4])
         typ = buf[p + 4:p + 8]
-        data = buf[p + 8:p + 8 + ln]
+        out.append((typ, ln, buf[p + 8:p + 8 + ln]))
+        p += 12 + ln
+    return out
+
+
+def unwrap_png(buf):
+    if buf[:2] != b"\x89P":
+        return None
+    idat = []
+    itxt = []
+    for typ, ln, data in chunks(buf):
         if typ == b"IDAT":
             idat.append(data)
         elif typ == b"iTXt":
@@ -62,20 +69,24 @@ def unwrap_png(buf):
                 if raw[:1] != b"\x47":
                     raw = zlib.decompress(raw)
                 itxt.append((n, raw))
-        p += 12 + ln
     if idat:
         blob = b"".join(idat)
         if blob[:1] == b"\x47":
             return blob
         try:
-            out = zlib.decompress(blob)
-            if out[:1] == b"\x47":
-                return out
+            d = zlib.decompress(blob)
+            if d[:1] == b"\x47":
+                return d
         except Exception:
             pass
     if itxt:
         itxt.sort()
         return b"".join(x for _, x in itxt)
+    i = buf.rfind(b"IEND")
+    if i > 0 and len(buf) > i + 8:
+        tail = buf[i + 8:]
+        if tail[:1] == b"\x47":
+            return tail
     return None
 
 
@@ -100,46 +111,33 @@ def media_of(s):
     return src, text
 
 
-def do_test(s):
-    try:
-        r = creq.get(source_of(s), headers=hdr(), impersonate="chrome", timeout=25)
-        head = r.text[:120].replace('"', "'").replace("\n", " ")
-        return Response('{"status":%d,"head":"%s"}' % (r.status_code, head), media_type="application/json")
-    except Exception as e:
-        return Response('{"errore":"%s"}' % str(e).replace('"', "'"), media_type="application/json")
-
-
-def do_chain(s):
-    out = {}
-    try:
-        src, text = media_of(s)
-        segs = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
-        if not segs:
-            out["nota"] = "nessun segmento"
-            return Response(json.dumps(out), media_type="application/json")
-        sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
-        b = sg.content
-        ts = unwrap_png(b)
-        out["segmento"] = sg.status_code
-        out["len"] = len(b)
-        out["ts"] = ts[:1].hex() if ts else None
-        out["tsLen"] = len(ts) if ts else 0
-    except Exception as e:
-        out["errore"] = str(e)
-    return Response(json.dumps(out), media_type="application/json")
-
-
 def do_fhex(s):
     try:
         src, text = media_of(s)
         segs = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
         if not segs:
-            return Response("nessun segmento nel manifest", media_type="text/plain")
+            return Response("nessun segmento", media_type="text/plain")
         sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
         b = sg.content
-        ts = unwrap_png(b)
-        out = ["status: %d" % sg.status_code, "ct: %s" % sg.headers.get("content-type"), "len: %d" % len(b)]
-        out.append("ts: %s" % (ts[:8].hex(" ") if ts else "NO"))
+        out = ["len: %d" % len(b), "head: %s" % b[:16].hex(" ")]
+        ch = chunks(b)
+        out.append("chunks: " + " ".join("%s:%d" % (t.decode("latin1", "replace"), l) for t, l, _ in ch[:14]))
+        idat = [d for t, l, d in ch if t == b"IDAT"]
+        blob = b"".join(idat)
+        out.append("idatLen: %d" % len(blob))
+        out.append("idatHead: %s" % blob[:16].hex(" "))
+        try:
+            d = zlib.decompress(blob)
+            out.append("decompLen: %d" % len(d))
+            out.append("decompHead: %s" % d[:16].hex(" "))
+        except Exception as e:
+            out.append("decompErr: %s" % e)
+        i = b.rfind(b"IEND")
+        out.append("iend: %d" % i)
+        if i > 0:
+            tail = b[i + 8:]
+            out.append("tailLen: %d" % len(tail))
+            out.append("tailHead: %s" % tail[:16].hex(" "))
         return Response("\n".join(out), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
@@ -219,10 +217,6 @@ def dispatch(request: Request, path: str = ""):
         return Response("pitsport proxy", media_type="text/plain")
     if name == "debug":
         return Response('{"ok":true}', media_type="application/json")
-    if name == "test":
-        return do_test(q.get("s", "103388"))
-    if name == "chain":
-        return do_chain(q.get("s", "103388"))
     if name == "fhex":
         return do_fhex(q.get("s", "103388"))
     if name == "one":
