@@ -33,6 +33,12 @@ def hdr(extra=None):
     return h
 
 
+def arg_u(parts, q):
+    if len(parts) > 1 and parts[1]:
+        return parts[1].split(".")[0]
+    return q.get("u", "")
+
+
 def unwrap_png(buf):
     if buf[:2] != b"\x89P":
         return None
@@ -100,12 +106,22 @@ def do_chain(s):
         out["segmento"] = sg.status_code
         out["len"] = len(b)
         out["head"] = b[:8].hex(" ")
-        out["ct"] = sg.headers.get("content-type")
         out["png"] = b[:2] == b"\x89P"
         out["ts"] = b[:1] == b"\x47"
     except Exception as e:
         out["errore"] = str(e)
     return Response(json.dumps(out), media_type="application/json")
+
+
+def do_raw(request, s):
+    try:
+        src = source_of(s)
+        host = str(request.base_url).rstrip("/") + "/api"
+        r = creq.get(src, headers=hdr(), impersonate="chrome", timeout=25)
+        out = ["status upstream: %d" % r.status_code, "---", r.text[:800]]
+        return Response("\n".join(out), media_type="text/plain")
+    except Exception as e:
+        return Response("errore: " + str(e), media_type="text/plain")
 
 
 def do_one(request, s):
@@ -191,12 +207,14 @@ def dispatch(request: Request, path: str = ""):
         return do_test(q.get("s", "103388"))
     if name == "chain":
         return do_chain(q.get("s", "103388"))
+    if name == "raw":
+        return do_raw(request, q.get("s", "103388"))
     if name == "one":
         return do_one(request, q.get("s", "103388"))
     if name == "playlist.m3u":
         return do_playlist(request)
     if name == "m3u8":
-        return do_m3u8(request, q.get("u", ""))
+        return do_m3u8(request, arg_u(parts, q))
     if name == "seg":
-        return do_seg(q.get("u", ""))
+        return do_seg(arg_u(parts, q))
     return Response("rotta non trovata", status_code=404)
