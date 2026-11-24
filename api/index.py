@@ -59,18 +59,7 @@ def unwrap_png(buf):
     return b"".join(x for _, x in parts)
 
 
-@app.get("/")
-def index():
-    return Response("pitsport proxy", media_type="text/plain")
-
-
-@app.get("/debug")
-def debug():
-    return Response('{"ok":true}', media_type="application/json")
-
-
-@app.get("/test")
-def test(s: str = "103388"):
+def do_test(s):
     try:
         pr = creq.get(API + "/programs/" + s, headers=hdr({"Referer": "https://pitsport.st/", "Accept": "application/json"}), impersonate="chrome", timeout=25)
         vids = pr.json()["data"].get("videos") or []
@@ -78,13 +67,13 @@ def test(s: str = "103388"):
         w = creq.post(EMB, json={"watchId": uuid}, headers=hdr({"Accept": "*/*"}), impersonate="chrome", timeout=25)
         src = w.json().get("url", "")
         r = creq.get(src, headers=hdr(), impersonate="chrome", timeout=25)
-        return Response('{"status":%d,"head":"%s"}' % (r.status_code, r.text[:120].replace('"', "'").replace("\n", " ")), media_type="application/json")
+        head = r.text[:120].replace('"', "'").replace("\n", " ")
+        return Response('{"status":%d,"head":"%s"}' % (r.status_code, head), media_type="application/json")
     except Exception as e:
         return Response('{"errore":"%s"}' % str(e).replace('"', "'"), media_type="application/json")
 
 
-@app.get("/playlist.m3u")
-def playlist(request: Request):
+def do_playlist(request):
     try:
         r = creq.get(API + "/live-now", headers=hdr({"Referer": "https://pitsport.st/", "Accept": "application/json"}), impersonate="chrome", timeout=25)
         data = r.json()["data"]
@@ -111,8 +100,7 @@ def playlist(request: Request):
         return Response("errore: " + str(e), status_code=502)
 
 
-@app.get("/m3u8")
-def m3u8(request: Request, u: str = ""):
+def do_m3u8(request, u):
     try:
         url = b64d(u)
         r = creq.get(url, headers=hdr(), impersonate="chrome", timeout=25)
@@ -137,8 +125,7 @@ def m3u8(request: Request, u: str = ""):
         return Response("errore: " + str(e), status_code=502)
 
 
-@app.get("/seg")
-def seg(u: str = ""):
+def do_seg(u):
     try:
         url = b64d(u)
         r = creq.get(url, headers=hdr(), impersonate="chrome", timeout=25)
@@ -151,3 +138,22 @@ def seg(u: str = ""):
         return Response(buf, media_type=r.headers.get("content-type", "video/mp2t"))
     except Exception as e:
         return Response("errore: " + str(e), status_code=502)
+
+
+@app.get("/{path:path}")
+def dispatch(request: Request, path: str = ""):
+    name = path.rstrip("/").split("/")[-1] if path else ""
+    q = request.query_params
+    if name in ("", "index"):
+        return Response("pitsport proxy", media_type="text/plain")
+    if name == "debug":
+        return Response('{"ok":true}', media_type="application/json")
+    if name == "test":
+        return do_test(q.get("s", "103388"))
+    if name == "playlist.m3u":
+        return do_playlist(request)
+    if name == "m3u8":
+        return do_m3u8(request, q.get("u", ""))
+    if name == "seg":
+        return do_seg(q.get("u", ""))
+    return Response("rotta non trovata", status_code=404)
