@@ -49,9 +49,7 @@ def chunks(buf):
     return out
 
 
-def payload_of(buf):
-    if buf[:2] != b"\x89P":
-        return None
+def decomp(buf):
     idat = []
     ihdr = None
     for typ, ln, data in chunks(buf):
@@ -60,29 +58,28 @@ def payload_of(buf):
         elif typ == b"IHDR":
             ihdr = data
     if not idat or not ihdr:
-        return None
+        return None, None
     try:
-        d = zlib.decompress(b"".join(idat))
+        return zlib.decompress(b"".join(idat)), ihdr
     except Exception:
-        return None
-    w, h = struct.unpack(">II", ihdr[:8])
-    bpp = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ihdr[9], 3) * max(1, ihdr[8] // 8)
-    row = 1 + w * bpp
-    if row < 2:
-        return None
-    return b"".join(d[k + 1:k + row] for k in range(0, len(d) - row + 1, row)), row
+        return None, ihdr
 
 
 def unwrap_png(buf):
-    res = payload_of(buf)
-    if not res:
+    d, ihdr = decomp(buf)
+    if not d:
         return None
-    payload, _row = res
-    i = payload.find(b"KWP1")
-    j = payload.find(b"\x47", i + 4) if i >= 0 else payload.find(b"\x47")
-    while j >= 0 and j + 188 < len(payload) and payload[j + 188] != 0x47:
-        j = payload.find(b"\x47", j + 1)
-    return payload[j:] if j >= 0 else None
+    i = d.find(b"KWP1")
+    if i >= 0 and len(d) >= i + 8:
+        ln = struct.unpack(">I", d[i + 4:i + 8])[0]
+        start = i + 8
+        if 0 < ln <= len(d) - start and d[start] == 0x47:
+            return d[start:start + ln]
+        j = d.find(b"\x47", i + 8)
+        if j >= 0:
+            return d[j:]
+    j = d.find(b"\x47")
+    return d[j:] if j >= 0 else None
 
 
 def follow(url):
@@ -110,16 +107,25 @@ def do_fhex(s):
         src, text = follow(source_of(s))
         segs = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
         sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
-        res = payload_of(sg.content)
-        if not res:
-            return Response("payload non estratto", media_type="text/plain")
-        payload, row = res
-        n = len(payload) // 188
-        ok = sum(1 for k in range(0, n * 188, 188) if payload[k] == 0x47)
-        out = ["row: %d" % row, "payloadLen: %d" % len(payload), "pacchetti: %d" % n, "allineati: %d" % ok]
-        out.append("ratio: %.3f" % (ok / max(1, n)))
-        out.append("inizio riga 3: %s" % payload[row * 3 - 10:row * 3 + 10].hex(" "))
-        out.append("testa: %s" % payload[:20].hex(" "))
+        d, ihdr = decomp(sg.content)
+        if not d:
+            return Response("decompress fallita", media_type="text/plain")
+        w, h = struct.unpack(">II", ihdr[:8])
+        out = ["dim: %dx%d depth %d ctype %d" % (w, h, ihdr[8], ihdr[9])]
+        out.append("decompLen: %d" % len(d))
+        out.append("magic: %s" % d[:8].hex(" "))
+        if d[:4] == b"KWP1":
+            ln = struct.unpack(">I", d[4:8])[0]
+            out.append("lunghezzaDichiarata: %d" % ln)
+            out.append("coerente: %s" % (ln == len(d) - 8))
+            out.append("byte8: %s" % d[8:16].hex(" "))
+            t = unwrap_png(sg.content)
+            out.append("estrattoLen: %d" % (len(t) if t else 0))
+            out.append("estrattoHead: %s" % (t[:16].hex(" ") if t else "-"))
+            if t:
+                n = len(t) // 188
+                ok = sum(1 for k in range(0, n * 188, 188) if t[k] == 0x47)
+                out.append("allineati: %d/%d (%.3f)" % (ok, n, ok / max(1, n)))
         return Response("\n".join(out), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
