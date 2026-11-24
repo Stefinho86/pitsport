@@ -1,4 +1,4 @@
-import os, re, json, base64, zlib, struct
+import os, re, json, base64, zlib, struct, time
 from urllib.parse import urljoin
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
@@ -8,6 +8,7 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 API = "https://pitsport.st/api/v1"
 EMB = "https://api.embdlol.st/watch"
 REF = "https://embdlol.st/"
+SRC = {}
 
 app = FastAPI()
 
@@ -66,33 +67,58 @@ def decomp(buf):
 
 
 def unfilter(d, row, bpp):
-    out = bytearray()
-    prev = bytearray(row - 1)
-    for k in range(0, len(d) - row + 1, row):
+    try:
+        import numpy as np
+    except Exception:
+        np = None
+    rows = len(d) // row
+    out = []
+    prev = bytes(row - 1)
+    for i in range(rows):
+        k = i * row
         ft = d[k]
-        line = bytearray(d[k + 1:k + row])
-        if ft == 1:
-            for i in range(bpp, len(line)):
-                line[i] = (line[i] + line[i - bpp]) & 0xFF
+        line = d[k + 1:k + row]
+        if ft == 0:
+            res = line
+        elif ft == 1 and np is not None:
+            a = np.frombuffer(line, dtype=np.uint8).reshape(-1, bpp).astype(np.int32)
+            res = (np.cumsum(a, axis=0) & 0xFF).astype(np.uint8).tobytes()
+        elif ft == 2 and np is not None:
+            a = np.frombuffer(line, dtype=np.uint8).astype(np.int16)
+            b = np.frombuffer(prev, dtype=np.uint8).astype(np.int16)
+            res = ((a + b) & 0xFF).astype(np.uint8).tobytes()
+        elif ft == 1:
+            l = bytearray(line)
+            for j in range(bpp, len(l)):
+                l[j] = (l[j] + l[j - bpp]) & 0xFF
+            res = bytes(l)
         elif ft == 2:
-            for i in range(len(line)):
-                line[i] = (line[i] + prev[i]) & 0xFF
+            l = bytearray(line)
+            for j in range(len(l)):
+                l[j] = (l[j] + prev[j]) & 0xFF
+            res = bytes(l)
         elif ft == 3:
-            for i in range(len(line)):
-                a = line[i - bpp] if i >= bpp else 0
-                line[i] = (line[i] + ((a + prev[i]) >> 1)) & 0xFF
+            l = bytearray(line)
+            for j in range(len(l)):
+                a = l[j - bpp] if j >= bpp else 0
+                l[j] = (l[j] + ((a + prev[j]) >> 1)) & 0xFF
+            res = bytes(l)
         elif ft == 4:
-            for i in range(len(line)):
-                a = line[i - bpp] if i >= bpp else 0
-                b = prev[i]
-                c = prev[i - bpp] if i >= bpp else 0
+            l = bytearray(line)
+            for j in range(len(l)):
+                a = l[j - bpp] if j >= bpp else 0
+                b = prev[j]
+                c = prev[j - bpp] if j >= bpp else 0
                 p = a + b - c
                 pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
                 pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
-                line[i] = (line[i] + pr) & 0xFF
-        out += line
-        prev = line
-    return bytes(out)
+                l[j] = (l[j] + pr) & 0xFF
+            res = bytes(l)
+        else:
+            res = line
+        out.append(res)
+        prev = res
+    return b"".join(out)
 
 
 def unwrap_png(buf):
@@ -116,18 +142,6 @@ def unwrap_png(buf):
     return flat[8:] if len(flat) > 8 else None
 
 
-def follow(url):
-    r = creq.get(url, headers=hdr(), impersonate="chrome", timeout=25)
-    text = r.text
-    if "#EXT-X-STREAM-INF" in text:
-        v = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
-        if v:
-            url = urljoin(url, v[0])
-            r = creq.get(url, headers=hdr(), impersonate="chrome", timeout=25)
-            text = r.text
-    return url, text
-
-
 def source_of(s):
     pr = creq.get(API + "/programs/" + s, headers=hdr({"Referer": "https://pitsport.st/", "Accept": "application/json"}), impersonate="chrome", timeout=25)
     vids = pr.json()["data"].get("videos") or []
@@ -136,17 +150,45 @@ def source_of(s):
     return w.json().get("url", "")
 
 
+def src_of(s):
+    e = SRC.get(s)
+    if e and time.time() - e[1] < 60:
+        return e[0]
+    u = source_of(s)
+    SRC[s] = (u, time.time())
+    return u
+
+
+def fetch_media(s):
+    src = src_of(s)
+    r = creq.get(src, headers=hdr(), impersonate="chrome", timeout=25)
+    if r.status_code != 200:
+        SRC.pop(s, None)
+        src = src_of(s)
+        r = creq.get(src, headers=hdr(), impersonate="chrome", timeout=25)
+    text = r.text
+    if "#EXT-X-STREAM-INF" in text:
+        v = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
+        if v:
+            src = urljoin(src, v[0])
+            r = creq.get(src, headers=hdr(), impersonate="chrome", timeout=25)
+            text = r.text
+    return src, text
+
+
 def do_fhex(s):
     try:
-        src, text = follow(source_of(s))
+        src, text = fetch_media(s)
         segs = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
         sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
+        t0 = time.time()
         t = unwrap_png(sg.content)
+        dt = time.time() - t0
         if not t:
             return Response("estrazione fallita", media_type="text/plain")
         n = len(t) // 188
         ok = sum(1 for x in range(0, n * 188, 188) if t[x] == 0x47)
-        return Response("len: %d n: %d allineati: %d (%.3f)" % (len(t), n, ok, ok / max(1, n)), media_type="text/plain")
+        return Response("len: %d n: %d allineati: %d (%.3f)\ntempo: %.2fs" % (len(t), n, ok, ok / max(1, n), dt), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
 
@@ -177,7 +219,7 @@ def do_playlist(request):
 
 def do_m3u8(request, u):
     try:
-        src, text = follow(source_of(b64d(u)))
+        src, text = fetch_media(b64d(u))
         host = str(request.base_url).rstrip("/") + "/api"
         out = []
         for line in text.splitlines():
@@ -201,10 +243,11 @@ def do_seg(u):
         if r.status_code != 200:
             return Response(r.text[:200], status_code=r.status_code, media_type="text/plain")
         buf = r.content
-        ts = unwrap_png(buf)
-        if ts:
-            return Response(ts, media_type="video/mp2t")
-        return Response(buf, media_type=r.headers.get("content-type", "video/mp2t"))
+        if buf[:2] == b"\x89P":
+            ts = unwrap_png(buf)
+            if ts:
+                return Response(ts, media_type="video/mp2t", headers={"cache-control": "public, max-age=31536000, immutable"})
+        return Response(buf, media_type=r.headers.get("content-type", "video/mp2t"), headers={"cache-control": "public, max-age=31536000, immutable"})
     except Exception as e:
         return Response("errore: " + str(e), status_code=502)
 
