@@ -1,5 +1,4 @@
 import os, re, json, base64, zlib, struct
-from collections import Counter
 from urllib.parse import urljoin
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
@@ -130,27 +129,30 @@ def do_fhex(s):
         src, text = follow(source_of(s))
         segs = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
         sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
-        t = unwrap_png(sg.content)
-        if not t:
-            return Response("estrazione fallita", media_type="text/plain")
-        n = len(t) // 188
-        cnt = Counter()
-        for i in range(0, n * 188, 188):
-            cnt[((t[i + 1] & 0x1F) << 8) | t[i + 2]] += 1
-        out = ["n: %d" % n, "rari: " + " ".join("%d:%d" % (k, v) for k, v in cnt.items() if v < 8)]
-        out.append("pat: %d  pmtCand: %d" % (cnt.get(0, 0), cnt.get(4096, 0)))
-        for i in range(0, n * 188, 188):
-            pid = ((t[i + 1] & 0x1F) << 8) | t[i + 2]
-            if pid == 0:
-                st = i + 4 + (1 + t[i + 4])
-                out.append("PAT: %s" % t[st:st + 40].hex(" "))
-                break
-        for i in range(0, n * 188, 188):
-            pid = ((t[i + 1] & 0x1F) << 8) | t[i + 2]
-            if pid == 4096:
-                st = i + 4 + (1 + t[i + 4] if (t[i + 1] & 0x40) else 0)
-                out.append("PID4096: %s" % t[st:st + 60].hex(" "))
-                break
+        d, ihdr = decomp(sg.content)
+        w, h = struct.unpack(">II", ihdr[:8])
+        row = 1 + w * 3
+        rows = len(d) // row
+        first = d[1:row]
+        ln = struct.unpack(">I", first[4:8])[0] if first[:4] == b"KWP1" else 0
+        per = []
+        for k in range(row, rows * row, row):
+            seg = d[k + 1:k + row]
+            c = 0
+            j = -1
+            for i in range(max(0, len(seg) - 376)):
+                if seg[i] == 0x47 and seg[i + 188] == 0x47 and seg[i + 376] == 0x47:
+                    j = i
+                    break
+            while j >= 0 and j + 188 <= len(seg) and seg[j] == 0x47:
+                c += 1
+                j += 188
+            per.append(c)
+        out = ["row: %d rows: %d" % (row, rows), "ln: %d pacchettiAttesi: %d" % (ln, ln // 188)]
+        out.append("pacchettiEstratti: %d" % sum(per))
+        out.append("perRiga min/max/media: %d/%d/%.2f" % (min(per), max(per), sum(per) / len(per)))
+        out.append("righeZero: %d" % sum(1 for x in per if x == 0))
+        out.append("prime20: %s" % ",".join(str(x) for x in per[:20]))
         return Response("\n".join(out), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
