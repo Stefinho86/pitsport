@@ -65,21 +65,6 @@ def decomp(buf):
         return None, ihdr
 
 
-def packets(seg):
-    j = -1
-    for i in range(max(0, len(seg) - 376)):
-        if seg[i] == 0x47 and seg[i + 188] == 0x47 and seg[i + 376] == 0x47:
-            j = i
-            break
-    if j < 0:
-        return b""
-    out = []
-    while j + 188 <= len(seg) and seg[j] == 0x47:
-        out.append(seg[j:j + 188])
-        j += 188
-    return b"".join(out)
-
-
 def unwrap_png(buf):
     d, ihdr = decomp(buf)
     if not d or not ihdr:
@@ -90,18 +75,27 @@ def unwrap_png(buf):
     rows = len(d) // row
     if row < 2 or rows < 2:
         return None
-    first = d[1:row]
+    flat = b"".join(d[k + 1:k + row] for k in range(0, rows * row, row))
     ln = 0
-    if first[:4] == b"KWP1":
-        ln = struct.unpack(">I", first[4:8])[0]
-        first = first[8:]
-    parts = [packets(first)]
-    for k in range(row, rows * row, row):
-        parts.append(packets(d[k + 1:k + row]))
-    payload = b"".join(parts)
-    if ln and 0 < ln <= len(payload):
-        return payload[:ln]
-    return payload if payload else None
+    if flat[:4] == b"KWP1":
+        ln = struct.unpack(">I", flat[4:8])[0]
+        flat = flat[8:]
+    out = []
+    i = 0
+    n = len(flat)
+    while i + 188 < n:
+        if flat[i] == 0x47 and flat[i + 188] == 0x47:
+            j = i
+            while j + 188 <= n and flat[j] == 0x47:
+                out.append(flat[j:j + 188])
+                j += 188
+            i = j
+        else:
+            i += 1
+    payload = b"".join(out)
+    if not payload:
+        return None
+    return payload[:ln] if ln and ln <= len(payload) else payload
 
 
 def follow(url):
@@ -129,31 +123,12 @@ def do_fhex(s):
         src, text = follow(source_of(s))
         segs = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
         sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
-        d, ihdr = decomp(sg.content)
-        w, h = struct.unpack(">II", ihdr[:8])
-        row = 1 + w * 3
-        rows = len(d) // row
-        first = d[1:row]
-        ln = struct.unpack(">I", first[4:8])[0] if first[:4] == b"KWP1" else 0
-        per = []
-        for k in range(row, rows * row, row):
-            seg = d[k + 1:k + row]
-            c = 0
-            j = -1
-            for i in range(max(0, len(seg) - 376)):
-                if seg[i] == 0x47 and seg[i + 188] == 0x47 and seg[i + 376] == 0x47:
-                    j = i
-                    break
-            while j >= 0 and j + 188 <= len(seg) and seg[j] == 0x47:
-                c += 1
-                j += 188
-            per.append(c)
-        out = ["row: %d rows: %d" % (row, rows), "ln: %d pacchettiAttesi: %d" % (ln, ln // 188)]
-        out.append("pacchettiEstratti: %d" % sum(per))
-        out.append("perRiga min/max/media: %d/%d/%.2f" % (min(per), max(per), sum(per) / len(per)))
-        out.append("righeZero: %d" % sum(1 for x in per if x == 0))
-        out.append("prime20: %s" % ",".join(str(x) for x in per[:20]))
-        return Response("\n".join(out), media_type="text/plain")
+        t = unwrap_png(sg.content)
+        if not t:
+            return Response("estrazione fallita", media_type="text/plain")
+        n = len(t) // 188
+        ok = sum(1 for x in range(0, n * 188, 188) if t[x] == 0x47)
+        return Response("len: %d n: %d allineati: %d (%.3f)" % (len(t), n, ok, ok / max(1, n)), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
 
