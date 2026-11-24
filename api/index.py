@@ -1,4 +1,5 @@
 import os, re, json, base64, zlib, struct
+from collections import Counter
 from urllib.parse import urljoin
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
@@ -133,13 +134,27 @@ def do_fhex(s):
         if not t:
             return Response("estrazione fallita", media_type="text/plain")
         n = len(t) // 188
-        ok = sum(1 for x in range(0, n * 188, 188) if t[x] == 0x47)
-        bad = -1
-        for x in range(0, n * 188, 188):
-            if t[x] != 0x47:
-                bad = x
+        cnt = Counter()
+        for i in range(0, min(n, 2000) * 188, 188):
+            cnt[((t[i + 1] & 0x1F) << 8) | t[i + 2]] += 1
+        out = ["len: %d n: %d" % (len(t), n)]
+        out.append("pid: " + " ".join("%d:%d" % (k, v) for k, v in cnt.most_common(8)))
+        pmt = None
+        for i in range(0, min(n, 200) * 188, 188):
+            pid = ((t[i + 1] & 0x1F) << 8) | t[i + 2]
+            if pid == 0 and (t[i + 1] & 0x40):
+                p = i + 4 + (1 + t[i + 4])
+                pmt = ((t[p] & 0x1F) << 8) | t[p + 1]
                 break
-        return Response("len: %d\nn: %d\nallineati: %d (%.3f)\nprimoBad: %d\ntesta: %s" % (len(t), n, ok, ok / max(1, n), bad, t[:16].hex(" ")), media_type="text/plain")
+        out.append("pmtPid: %s" % pmt)
+        if pmt is not None:
+            for i in range(0, min(n, 500) * 188, 188):
+                pid = ((t[i + 1] & 0x1F) << 8) | t[i + 2]
+                if pid == pmt and (t[i + 1] & 0x40):
+                    start = i + 4 + (1 + t[i + 4])
+                    out.append("pmt: %s" % t[start:start + 120].hex(" "))
+                    break
+        return Response("\n".join(out), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
 
