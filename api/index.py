@@ -73,7 +73,10 @@ def payload_of(buf):
     bpp = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ihdr[9], 3) * max(1, ihdr[8] // 8)
     row = 1 + w * bpp
     if row > 1 and len(d) % row == 0:
-        payload = b"".join(d[k + 1:k + row] for k in range(0, len(d), row))
+        per = (row - 1) // 188 * 188
+        if per == 0:
+            return None, row
+        payload = b"".join(d[k + 1:k + 1 + per] for k in range(0, len(d), row))
     else:
         payload = d
     return payload, row
@@ -121,15 +124,17 @@ def do_fhex(s):
         src, text = follow(source_of(s))
         segs = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
         sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
-        payload, row = payload_of(sg.content)
-        if not payload:
+        t = unwrap_png(sg.content)
+        if not t:
             return Response("estrazione fallita", media_type="text/plain")
-        out = ["row: %d" % row, "payloadLen: %d" % len(payload)]
-        out.append("confine1: %s" % payload[row - 24:row + 24].hex(" "))
-        out.append("confine2: %s" % payload[2 * row - 24:2 * row + 24].hex(" "))
-        out.append("ultimoPacchettoPrimaRiga: %d" % ((row - 1) // 188 * 188))
-        out.append("resto: %d" % ((row - 1) % 188))
-        return Response("\n".join(out), media_type="text/plain")
+        n = len(t) // 188
+        ok = sum(1 for x in range(0, n * 188, 188) if t[x] == 0x47)
+        bad = -1
+        for x in range(0, n * 188, 188):
+            if t[x] != 0x47:
+                bad = x
+                break
+        return Response("len: %d\nn: %d\nallineati: %d (%.3f)\nprimoBad: %d\ntesta: %s" % (len(t), n, ok, ok / max(1, n), bad, t[:16].hex(" ")), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
 
