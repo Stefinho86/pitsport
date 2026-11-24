@@ -134,26 +134,35 @@ def do_fhex(s):
         if not t:
             return Response("estrazione fallita", media_type="text/plain")
         n = len(t) // 188
-        cnt = Counter()
-        for i in range(0, min(n, 2000) * 188, 188):
-            cnt[((t[i + 1] & 0x1F) << 8) | t[i + 2]] += 1
-        out = ["len: %d n: %d" % (len(t), n)]
-        out.append("pid: " + " ".join("%d:%d" % (k, v) for k, v in cnt.most_common(8)))
+        seq = []
+        for i in range(0, min(n, 20) * 188, 188):
+            seq.append(str(((t[i + 1] & 0x1F) << 8) | t[i + 2]))
+        out = ["n: %d" % n, "seq: " + ",".join(seq)]
         pmt = None
-        for i in range(0, min(n, 200) * 188, 188):
+        for i in range(0, n * 188, 188):
             pid = ((t[i + 1] & 0x1F) << 8) | t[i + 2]
             if pid == 0 and (t[i + 1] & 0x40):
-                p = i + 4 + (1 + t[i + 4])
-                pmt = ((t[p] & 0x1F) << 8) | t[p + 1]
+                p = i + 5 + t[i + 4]
+                pmt = ((t[p + 2] & 0x1F) << 8) | t[p + 3]
+                out.append("pmtPid: %s" % pmt)
                 break
-        out.append("pmtPid: %s" % pmt)
         if pmt is not None:
-            for i in range(0, min(n, 500) * 188, 188):
+            found = False
+            for i in range(0, n * 188, 188):
                 pid = ((t[i + 1] & 0x1F) << 8) | t[i + 2]
-                if pid == pmt and (t[i + 1] & 0x40):
-                    start = i + 4 + (1 + t[i + 4])
-                    out.append("pmt: %s" % t[start:start + 120].hex(" "))
+                if pid == pmt:
+                    start = i + 4 + (1 + t[i + 4] if (t[i + 1] & 0x40) else 0)
+                    out.append("pmt: %s" % t[start:start + 100].hex(" "))
+                    found = True
                     break
+            if not found:
+                out.append("pmt: assente nel segmento")
+        for i in range(0, min(n, 2000) * 188, 188):
+            pid = ((t[i + 1] & 0x1F) << 8) | t[i + 2]
+            if pid == 256 and (t[i + 1] & 0x40):
+                start = i + 4 + (1 + t[i + 4] if (t[i + 1] & 0x40) else 0)
+                out.append("video: %s" % t[start:start + 40].hex(" "))
+                break
         return Response("\n".join(out), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
