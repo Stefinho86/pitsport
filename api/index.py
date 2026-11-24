@@ -65,21 +65,35 @@ def decomp(buf):
         return None, ihdr
 
 
-def unwrap_png(buf):
+def payload_of(buf):
     d, ihdr = decomp(buf)
-    if not d:
+    if not d or not ihdr:
+        return None, None
+    w, h = struct.unpack(">II", ihdr[:8])
+    bpp = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ihdr[9], 3) * max(1, ihdr[8] // 8)
+    row = 1 + w * bpp
+    if row > 1 and len(d) % row == 0:
+        payload = b"".join(d[k + 1:k + row] for k in range(0, len(d), row))
+    else:
+        payload = d
+    return payload, row
+
+
+def unwrap_png(buf):
+    payload, _row = payload_of(buf)
+    if not payload:
         return None
-    i = d.find(b"KWP1")
-    if i >= 0 and len(d) >= i + 8:
-        ln = struct.unpack(">I", d[i + 4:i + 8])[0]
-        start = i + 8
-        if 0 < ln <= len(d) - start and d[start] == 0x47:
-            return d[start:start + ln]
-        j = d.find(b"\x47", i + 8)
+    if payload[:4] == b"KWP1" and len(payload) > 8:
+        ln = struct.unpack(">I", payload[4:8])[0]
+        if 0 < ln <= len(payload) - 8:
+            return payload[8:8 + ln]
+    i = payload.find(b"KWP1")
+    if i >= 0:
+        j = payload.find(b"\x47", i + 8)
         if j >= 0:
-            return d[j:]
-    j = d.find(b"\x47")
-    return d[j:] if j >= 0 else None
+            return payload[j:]
+    j = payload.find(b"\x47")
+    return payload[j:] if j >= 0 else None
 
 
 def follow(url):
@@ -107,25 +121,19 @@ def do_fhex(s):
         src, text = follow(source_of(s))
         segs = [x.strip() for x in text.splitlines() if x.strip() and not x.startswith("#")]
         sg = creq.get(urljoin(src, segs[0]), headers=hdr(), impersonate="chrome", timeout=25)
-        d, ihdr = decomp(sg.content)
-        if not d:
-            return Response("decompress fallita", media_type="text/plain")
-        w, h = struct.unpack(">II", ihdr[:8])
-        out = ["dim: %dx%d depth %d ctype %d" % (w, h, ihdr[8], ihdr[9])]
-        out.append("decompLen: %d" % len(d))
-        out.append("magic: %s" % d[:8].hex(" "))
-        if d[:4] == b"KWP1":
-            ln = struct.unpack(">I", d[4:8])[0]
-            out.append("lunghezzaDichiarata: %d" % ln)
-            out.append("coerente: %s" % (ln == len(d) - 8))
-            out.append("byte8: %s" % d[8:16].hex(" "))
-            t = unwrap_png(sg.content)
-            out.append("estrattoLen: %d" % (len(t) if t else 0))
-            out.append("estrattoHead: %s" % (t[:16].hex(" ") if t else "-"))
-            if t:
-                n = len(t) // 188
-                ok = sum(1 for k in range(0, n * 188, 188) if t[k] == 0x47)
-                out.append("allineati: %d/%d (%.3f)" % (ok, n, ok / max(1, n)))
+        payload, row = payload_of(sg.content)
+        if not payload:
+            return Response("payload non estratto", media_type="text/plain")
+        out = ["row: %d" % row, "payloadLen: %d" % len(payload), "inizio: %s" % payload[:12].hex(" ")]
+        t = unwrap_png(sg.content)
+        if t:
+            n = len(t) // 188
+            ok = sum(1 for k in range(0, n * 188, 188) if t[k] == 0x47)
+            out.append("estrattoLen: %d" % len(t))
+            out.append("allineati: %d/%d (%.3f)" % (ok, n, ok / max(1, n)))
+            out.append("testa: %s" % t[:16].hex(" "))
+        else:
+            out.append("estratto: NO")
         return Response("\n".join(out), media_type="text/plain")
     except Exception as e:
         return Response("errore: " + str(e), media_type="text/plain")
